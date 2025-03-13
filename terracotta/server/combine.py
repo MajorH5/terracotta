@@ -3,9 +3,10 @@
 Flask route to handle /combine calls.
 """
 
-from typing import Tuple, Optional
+from typing import Tuple, Any, Mapping, Dict
+import json
 
-from marshmallow import Schema, fields, validate, ValidationError
+from marshmallow import Schema, fields, validate, pre_load, ValidationError, EXCLUDE
 from flask import request, send_file, Response
 
 from terracotta import exceptions
@@ -17,20 +18,21 @@ class CombineQuerySchema(Schema):
     tile_y = fields.Int(required=True, description="y coordinate")
     tile_x = fields.Int(required=True, description="x coordinate")
 
-class CombineDatasetsSchema(Schema):
+class CombineOptionSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+    
     keys_list = fields.List(
         required=True, description="List of dataset keys identifying datasets, in order",
-        example=["europe/elevation", "europe/temperature", "europe/precipitation"],
+        example="[\"europe/elevation\", \"europe/temperature\", \"europe/precipitation\"]",
         cls_or_instance=fields.String()
     )
     rgb_keys = fields.List(
         validate=validate.Length(equal=3),
-        example=["red", "green", "blue"],
+        example="[\"red\", \"green\", \"blue\"]",
         required=False, description="Keys for red, green, and blue bands",
         cls_or_instance=fields.String()
     )
-
-class CombineOptionSchema(Schema):
     r_range = fields.List(
         StringOrNumber(allow_none=True, validate=validate_stretch_range),
         validate=validate.Length(equal=2),
@@ -77,18 +79,34 @@ class CombineOptionSchema(Schema):
         description="Pixel dimensions of the returned PNG image as JSON list.",
     )
 
-@TILE_API.route("/combine/<int:tile_z>/<int:tile_x>/<int:tile_y>.png", methods=["POST"])
+    @pre_load
+    def process_ranges(self, data: Mapping[str, Any], **kwargs: Any) -> Dict[str, Any]:
+        print("OK")
+        data = dict(data.items())
+
+        for var in ("keys_list", "rgb_keys"):
+            val = data.get(var)
+            if val:
+                if isinstance(val, str):
+                    try:
+                        data[var] = json.loads(val)
+                    except json.decoder.JSONDecodeError as exc:
+                        raise ValidationError(
+                            f"Could not decode value for {var} as JSON"
+                        ) from exc
+                elif not isinstance(val, list):
+                    raise ValidationError(f"{var} must be a list.")
+        
+        return data
+
+
+@TILE_API.route("/combine/<int:tile_z>/<int:tile_x>/<int:tile_y>.png", methods=["GET"])
 def get_combine(tile_z: int, tile_y: int, tile_x: int) -> Response:
     """Return the combined tiles from multiple datasets as a PNG image.
     ---
-    post:
+    get:
         summary: /combine (tile)
         description: Combine multiple datasets into one and retrieve the tiles from all datasets as a PNG image.
-        requestBody:
-            required: true
-            content:
-                application/json:
-                    schema: CombineDatasetsSchema
         parameters:
             - in: path
               schema: CombineQuerySchema
@@ -110,14 +128,13 @@ def _get_combine_image(
 ) -> Response:
     from terracotta.handlers.combine import combine
 
-    body = CombineDatasetsSchema().load(request.get_json())
     options = CombineOptionSchema().load(request.args)
 
-    keys_list = body.get("keys_list")
+    keys_list = options.pop("keys_list")
     keys_list = [[key.strip() for key in keys.split("/") if key.strip()] for keys in keys_list]
 
-    rgb_values = body.get("rgb_keys")
-    tile_size = body.get("tile_size")
+    rgb_values = options.get("rgb_keys")
+    tile_size = options.get("tile_size")
     
     if rgb_values is not None:
         rgb_values = (rgb_values[0], rgb_values[1], rgb_values[2])
