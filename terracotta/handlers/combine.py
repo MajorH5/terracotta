@@ -5,6 +5,7 @@ Handle /combine API endpoint.
 """
 from typing import Sequence, Tuple, Optional, TypeVar, BinaryIO
 from concurrent.futures import Future
+import concurrent
 
 from terracotta import get_driver, get_settings, image, xyz, exceptions
 from terracotta.profile import trace
@@ -84,6 +85,8 @@ def combine(
         else:
             futures = [get_band_future(some_keys) for some_keys in keys_list]
 
+        concurrent.futures.wait(futures, timeout=3)
+
         out_arrays = []
         band_items = zip(rgb_values, stretch_ranges_, futures)
 
@@ -108,8 +111,12 @@ def combine(
                     "Upper stretch bound must be higher than lower bound"
                 )
 
-            band_data = band_data_future.result()
-            out_arrays.append(image.to_uint8(band_data, *band_stretch_range))
+            if not band_data_future.exception() and band_data_future.done():
+                band_data = band_data_future.result()
+                out_arrays.append(image.to_uint8(band_data, *band_stretch_range))
     
-    out = np.ma.stack(out_arrays, axis=-1)
-    return image.array_to_png(out)
+    if len(out_arrays) > 0:
+        out = np.ma.stack(out_arrays, axis=-1)
+        return image.array_to_png(out)
+    else:
+        return image.empty_image(tile_size_)
